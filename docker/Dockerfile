@@ -33,13 +33,14 @@ RUN /app/bin/llama-server --version || true
 
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker/verify.sh /usr/local/bin/verify.sh
+COPY docker/autoscale.sh /usr/local/bin/autoscale.sh
 
 # MCP stdio server for web_search / web_fetch. llama-server spawns it as a
 # child process, so it ships in the image rather than as a separate service.
 COPY docker/mcp-web.sh /usr/local/bin/mcp-web
 COPY docker/mcp.json.template /etc/qwen38/mcp.json.template
 
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/verify.sh /usr/local/bin/mcp-web
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/verify.sh /usr/local/bin/autoscale.sh /usr/local/bin/mcp-web
 
 # The release tarball carries its own shared objects next to the binaries.
 ENV LD_LIBRARY_PATH=/app/bin:/usr/local/cuda/lib64

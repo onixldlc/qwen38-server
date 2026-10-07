@@ -24,6 +24,14 @@ else
     fail "--tools absent — llama.cpp release is too old for this EXTRA_ARGS"
 fi
 
+printf 'autoscale\n'
+if [ "${AUTO_SCALE:-1}" = "1" ] && command -v autoscale.sh >/dev/null 2>&1; then
+    autoscale.sh 2>&1 >/dev/null | sed 's/^/  /'
+    ok "table decision printed above; compare with what the server actually loaded"
+else
+    ok "AUTO_SCALE off, MODEL_FILE/CTX_SIZE taken from the environment"
+fi
+
 printf 'weights\n'
 for f in "${MODEL_FILE}" "${MMPROJ_FILE}"; do
     [ -s "${MODEL_DIR}/${f}" ] && ok "${f} $(du -h "${MODEL_DIR}/${f}" | cut -f1)" || fail "${MODEL_DIR}/${f} missing"

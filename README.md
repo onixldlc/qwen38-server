@@ -190,6 +190,20 @@ and `key_length = value_length = 256` that is 16 x 4 x 512 = 32768 elements per 
 **64 MiB per 1024 tokens at f16, 34 MiB at q8_0**. The other 49 blocks are SSM layers whose
 state does not grow with context, which is why a 27B holds 128K on one 24 GB card.
 
+The logic lives in `docker/autoscale.sh`, not buried in the entrypoint, so you can ask it
+what it would do without starting anything:
+
+```bash
+$ autoscale.sh                      # decide from nvidia-smi
+$ VRAM_MIB=49140 autoscale.sh       # decide for a card you do not have
+```
+
+It prints `KEY=VALUE` lines on stdout and its reasoning on stderr. Tier thresholds sit below
+the nominal card size on purpose — a "24 GB" card reports 24564 MiB (A5000, 3090), 23034 (L4)
+or 22731 (A10), so comparing `vram/1024` against 24 would drop every one of them a tier. A
+fixed row is also clamped to what actually fits: an A10 gets the 24 GB tier but 118784 context
+rather than 131072.
+
 `AUTO_SCALE=0` pins `MODEL_FILE` and `CTX_SIZE` from the environment. `VRAM_MIB=N` overrides
 the detection. On multi-GPU hosts the totals are summed, since llama.cpp splits layers across
 every visible device.

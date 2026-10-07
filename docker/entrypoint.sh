@@ -12,70 +12,22 @@ MODEL_DIR="${MODEL_DIR:-/models}"
 mkdir -p "$MODEL_DIR"
 
 # --- VRAM autoscaling -------------------------------------------------------
-# AUTO_SCALE=1 reads the card's VRAM and picks MODEL_FILE, the KV cache type and
-# CTX_SIZE to match. AUTO_SCALE=0 uses whatever the environment already holds.
-#
-# Weight sizes are the real file sizes from unsloth/Qwen3.8-27B-GGUF, in MiB.
-# The KV cost comes from the GGUF header: block_count 65 with
-# full_attention_interval 4 leaves 16 full-attention layers; head_count_kv 4 and
-# key_length = value_length = 256 give 16 * 4 * 512 = 32768 elements per token.
-#   f16  (2 B/elem)      -> 64 MiB per 1024 tokens
-#   q8_0 (~1.0625 B/elem)-> 34 MiB per 1024 tokens
-# The other 49 blocks are SSM layers whose state does not grow with context.
-
+# AUTO_SCALE=1 asks autoscale.sh which quant, context and KV type suit the card
+# in front of us. The decision happens here, before anything is downloaded,
+# because it is what decides WHICH file to download. AUTO_SCALE=0 uses the
+# MODEL_FILE and CTX_SIZE already in the environment.
 AUTO_SCALE="${AUTO_SCALE:-1}"
-# Same default as llama.cpp's own --fit-target (common.h: fit_params_target).
 FIT_MARGIN_MIB="${FIT_MARGIN_MIB:-1024}"
-MMPROJ_MIB=888
-MODEL_MAX_CTX=262144
-
-# Sum across devices: llama.cpp splits layers over every visible GPU by default.
-detect_vram_mib() {
-    command -v nvidia-smi >/dev/null 2>&1 || return 1
-    nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
-        | awk '{ t += $1 + 0 } END { if (t > 0) print int(t); else exit 1 }'
-}
-
-# Sets AS_MODEL / AS_KV / AS_CTX from $1 = total VRAM in MiB.
-pick_for_vram() {
-    local vram_mib="$1"
-    local gib=$(( vram_mib / 1024 ))
-    local weights_mib
-
-    if   [ "$gib" -ge 64 ]; then AS_MODEL=Qwen3.8-27B-UD-Q6_K_XL.gguf; AS_KV=f16;  weights_mib=24127; AS_CTX=0
-    elif [ "$gib" -ge 48 ]; then AS_MODEL=Qwen3.8-27B-UD-Q5_K_XL.gguf; AS_KV=f16;  weights_mib=19910; AS_CTX=131072
-    elif [ "$gib" -ge 32 ]; then AS_MODEL=Qwen3.8-27B-UD-Q5_K_XL.gguf; AS_KV=f16;  weights_mib=19910; AS_CTX=98304
-    elif [ "$gib" -ge 24 ]; then AS_MODEL=Qwen3.8-27B-UD-Q4_K_XL.gguf; AS_KV=q8_0; weights_mib=16746; AS_CTX=131072
-    # Below 24 GB the chart runs out; these keep a small card working rather
-    # than loading a quant that cannot fit.
-    elif [ "$gib" -ge 16 ]; then AS_MODEL=Qwen3.8-27B-UD-Q3_K_XL.gguf; AS_KV=q8_0; weights_mib=12537; AS_CTX=0
-    else                         AS_MODEL=Qwen3.8-27B-UD-Q2_K_XL.gguf; AS_KV=q8_0; weights_mib=9374;  AS_CTX=0
-    fi
-
-    # AS_CTX=0 means "whatever is left over", for cards past the last fixed row.
-    if [ "$AS_CTX" -eq 0 ]; then
-        local avail=$(( vram_mib - weights_mib - FIT_MARGIN_MIB ))
-        if [ "${ENABLE_VISION:-0}" = "1" ]; then
-            avail=$(( avail - MMPROJ_MIB ))
-        fi
-        local per_1k=64
-        [ "$AS_KV" = "q8_0" ] && per_1k=34
-        AS_CTX=$(( (avail / per_1k) * 1024 ))
-        [ "$AS_CTX" -gt "$MODEL_MAX_CTX" ] && AS_CTX="$MODEL_MAX_CTX"
-        [ "$AS_CTX" -lt 4096 ] && AS_CTX=4096
-        AS_CTX=$(( (AS_CTX / 4096) * 4096 ))
-    fi
-}
-
 AS_KV=""
+
 if [ "$AUTO_SCALE" = "1" ] && [ "${N_GPU_LAYERS:-0}" != "0" ]; then
-    if VRAM_MIB="${VRAM_MIB:-$(detect_vram_mib)}"; then
-        pick_for_vram "$VRAM_MIB"
-        MODEL_FILE="$AS_MODEL"
-        CTX_SIZE="$AS_CTX"
-        log "auto-scale: ${VRAM_MIB} MiB VRAM -> ${MODEL_FILE}, ctx ${CTX_SIZE}, KV ${AS_KV}"
+    if as_out="$(FIT_MARGIN_MIB="$FIT_MARGIN_MIB" /usr/local/bin/autoscale.sh)"; then
+        # autoscale.sh emits plain KEY=VALUE lines and nothing else.
+        eval "$as_out"
+        AS_KV="$CACHE_TYPE"
+        log "auto-scale: ${VRAM_MIB} MiB -> ${MODEL_FILE}, ctx ${CTX_SIZE}, KV ${AS_KV}"
     else
-        log "auto-scale: no nvidia-smi and no VRAM_MIB set, keeping MODEL_FILE=${MODEL_FILE}"
+        log "auto-scale: no card detected, keeping MODEL_FILE=${MODEL_FILE} ctx=${CTX_SIZE}"
     fi
 fi
 

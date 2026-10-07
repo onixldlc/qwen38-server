@@ -1,0 +1,221 @@
+name: Build and Push
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'VERSION'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 0.2.0). Empty = read the VERSION file.'
+        required: false
+        default: ''
+      publish:
+        description: 'Push to GHCR. Uncheck to build and smoke test only.'
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: qwen38-server
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  determine-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          INPUT_VERSION='${{ github.event.inputs.version }}'
+
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VERSION="${INPUT_VERSION}"
+          else
+            VERSION="$(tr -d '[:space:]' < VERSION)"
+          fi
+
+          if [[ -z "${VERSION}" ]]; then
+            echo "::error::VERSION is empty."
+            exit 1
+          fi
+
+          # The file holds the bare number; image tags are v-prefixed.
+          [[ "${VERSION}" == v* ]] || VERSION="v${VERSION}"
+
+          # Docker tags allow a narrow character set; sanitise rather than fail.
+          VERSION="$(printf '%s' "${VERSION}" | tr -c 'A-Za-z0-9._-' '-')"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            PUBLISH='${{ github.event.inputs.publish }}'
+          else
+            # The only other trigger is a push that changed VERSION.
+            PUBLISH=true
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "publish=${PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION} publish=${PUBLISH}"
+
+  build-and-push:
+    name: Build image
+    runs-on: ubuntu-latest
+    needs: determine-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One Dockerfile, two variants: the base image and the upstream release
+          # asset switch together (see docker/Dockerfile).
+          - variant: gpu
+            base: docker.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04
+            flavor: ubuntu-cuda-12.8-x64
+          - variant: cpu
+            base: docker.io/library/ubuntu:24.04
+            flavor: ubuntu-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        if: matrix.variant == 'gpu'
+        # The CUDA runtime base plus the 172 MB release asset does not fit next
+        # to the runner's preinstalled toolchains.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 locally
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          # Upstream publishes an x64 linux CUDA asset and an x64 ubuntu one;
+          # the arm64 assets are a different flavour matrix, so amd64 only here.
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            BASE_IMAGE=${{ matrix.base }}
+            LLAMA_FLAVOR=${{ matrix.flavor }}
+          tags: ${{ env.IMAGE_NAME }}:ci-${{ matrix.variant }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.variant }}
+
+      - name: Smoke test
+        # check only. One container, one pass.
+        run: |
+          set -euo pipefail
+          docker run --rm -e VARIANT --entrypoint sh \
+            "${IMAGE_NAME}:ci-${VARIANT}" -c '
+              set -eu
+
+              for b in llama-server llama-bench; do
+                [ -x "/app/bin/$b" ] || { echo "missing /app/bin/$b"; exit 1; }
+              done
+              echo "binaries present"
+
+              if ls /app/bin/*.so >/dev/null 2>&1; then
+                echo "shared objects shipped alongside"
+              fi
+
+              if [ "$VARIANT" != cpu ]; then
+                echo "cuda build: runtime check skipped, no libcuda on a runner"
+                exit 0
+              fi
+
+              /app/bin/llama-server --version 2>&1 | head -3
+              if /app/bin/llama-server --help 2>&1 | grep -q -- "--tools"; then
+                echo "--tools present (build new enough for EXTRA_ARGS)"
+              else
+                echo "--tools absent - llama.cpp release too old"
+                exit 1
+              fi
+            '
+          echo "smoke test passed"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          VARIANT: ${{ matrix.variant }}
+
+      - name: Log in to GitHub Container Registry
+        if: needs.determine-version.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        if: needs.determine-version.outputs.publish == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ matrix.base }}
+            LLAMA_FLAVOR=${{ matrix.flavor }}
+          # Pinned tag plus the rolling one: :gpu / :cpu always point at the
+          # newest build of that variant.
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}-${{ matrix.variant }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.determine-version.outputs.version }}-${{ matrix.variant }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.variant }}
+
+      - name: Summary
+        run: |
+          V="${{ needs.determine-version.outputs.version }}"
+          IMG="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
+          echo "**Variant:** \`${{ matrix.variant }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${V}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Published:** ${{ needs.determine-version.outputs.publish }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${IMG}:${V}-${{ matrix.variant }}\`, \`${IMG}:${{ matrix.variant }}\` (linux/amd64)" >> $GITHUB_STEP_SUMMARY
+          echo "**Base:** \`${{ matrix.base }}\` · **Asset:** \`${{ matrix.flavor }}\`" >> $GITHUB_STEP_SUMMARY
+
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    needs: [determine-version, build-and-push]
+    if: needs.determine-version.outputs.publish == 'true'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Creates the tag at this commit if it does not exist yet, and attaches
+      # GitHub's own source zip/tar.gz. Nothing is built here.
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.determine-version.outputs.version }}
+          name: ${{ needs.determine-version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          body: |
+            Images for this release:
+
+            ```
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}-gpu
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}-cpu
+            ```
+
+      - name: Summary
+        run: |
+          V="${{ needs.determine-version.outputs.version }}"
+          echo "**Tag:** \`${V}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Assets:** source zip and tar.gz, generated by GitHub" >> $GITHUB_STEP_SUMMARY

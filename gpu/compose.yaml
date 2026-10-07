@@ -1,0 +1,50 @@
+services:
+  qwen38:
+    # The published image. :gpu is the newest CUDA build; pin :vX.Y.Z-gpu if you
+    # want a fixed one. https://github.com/onixldlc/qwen38-server/pkgs/container/qwen38-server
+    #
+    # To build from this checkout instead — which is what you want if you are
+    # editing docker/ — add the dev override:
+    #   podman compose -f compose.yaml -f compose-dev.yaml up -d --build
+    image: ghcr.io/onixldlc/qwen38-server:gpu
+    pull_policy: always
+    container_name: qwen38
+    ports:
+      - "8080:8080"
+    volumes:
+      # Named volume: weights survive `compose down` and re-`up`. Holds .gguf only.
+      - qwen38-models:/models
+      # The built-in file tools in EXTRA_ARGS resolve relative paths against the
+      # server's working directory, /workspace. Mount a project there to give
+      # them something to work on — without this they only see an empty dir:
+      # - ./workspace:/workspace:z
+    # Compose auto-reads ./.env only to expand ${VAR} inside this file.
+    # Putting those vars INSIDE the container needs this line.
+    env_file:
+      - .env
+    # The RTX 3060 only (/dev/nvidia0, card1/renderD129, PCI 0000:0d:00.0).
+    # Swap for the UUID name if device indices ever shift:
+    #   nvidia.com/gpu=GPU-eee1bf52-918c-4f2d-2898-7af735f2a8c8
+    devices:
+      - nvidia.com/gpu=0
+    # SELinux on Bazzite blocks the nvidia device nodes otherwise.
+    security_opt:
+      - label=disable
+    # Docker / older podman instead of the `devices` line above:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           device_ids: ["0"]
+    #           capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15m
+
+volumes:
+  qwen38-models:

@@ -1,0 +1,18 @@
+# Build from this checkout instead of pulling the published image. Use it when
+# you are changing anything under docker/ — a released tag cannot contain edits
+# you have not published yet.
+#
+#   podman compose -f compose.yaml -f compose-dev.yaml up -d --build
+#
+# Everything else (ports, volume, devices, env_file) comes from compose.yaml;
+# this file only replaces where the image comes from. The local tag is distinct
+# so a dev image never shadows the pulled one.
+services:
+  qwen38:
+    image: localhost/qwen38-server:dev-gpu
+    pull_policy: never
+    build:
+      # Context is the repo root so both stacks share docker/.
+      context: ..
+      dockerfile: docker/Dockerfile
+      # GPU is the Dockerfile's default: CUDA base, ubuntu-cuda-12.8-x64 asset.

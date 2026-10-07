@@ -1,0 +1,42 @@
+services:
+  qwen38:
+    # The published image. :cpu is the newest CPU-only build; pin :vX.Y.Z-cpu if
+    # you want a fixed one. https://github.com/onixldlc/qwen38-server/pkgs/container/qwen38-server
+    #
+    # To build from this checkout instead — which is what you want if you are
+    # editing docker/ — add the dev override:
+    #   podman compose -f compose.yaml -f compose-dev.yaml up -d --build
+    image: ghcr.io/onixldlc/qwen38-server:cpu
+    pull_policy: always
+    container_name: qwen38-cpu
+    ports:
+      - "8080:8080"
+    volumes:
+      - qwen38-models:/models
+      # The built-in file tools in EXTRA_ARGS resolve relative paths against the
+      # server's working directory, /workspace. Mount a project there to give
+      # them something to work on — without this they only see an empty dir:
+      # - ./workspace:/workspace:z
+    # Compose auto-reads ./.env only to expand ${VAR} inside this file.
+    # Putting those vars INSIDE the container needs this line.
+    env_file:
+      - .env
+    # CFS quota, not a core count: 3.0 = three cores' worth of CPU time per
+    # period = 50% of a 6 vCPU box. Set CPU_LIMIT in .env.
+    cpus: ${CPU_LIMIT}
+    # Relative weight when the host is contended (1024 = normal). Halving it
+    # means other processes win the tie-break without changing the hard cap.
+    cpu_shares: 512
+    # Hard core pinning instead of a time share, if you prefer:
+    # cpuset: "0-2"
+    mem_limit: ${MEM_LIMIT}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20m
+
+volumes:
+  qwen38-models:

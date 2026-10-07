@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "web": {
+      "command": "/usr/local/bin/mcp-web",
+      "env": {
+        "SEARXNG_URL": "__SEARXNG_URL__",
+        "SEARCH_RESULTS": "__SEARCH_RESULTS__",
+        "FETCH_MAX_CHARS": "__FETCH_MAX_CHARS__",
+        "HTTP_TIMEOUT": "__HTTP_TIMEOUT__"
+      },
+      "timeout_ms": 60000
+    }
+  }
+}

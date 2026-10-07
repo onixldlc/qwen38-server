@@ -52,6 +52,15 @@ ENV MODEL_FILE=Qwen3.8-27B-UD-Q4_K_XL.gguf
 ENV MMPROJ_FILE=mmproj-BF16.gguf
 ENV ENABLE_VISION=1
 ENV MODEL_DIR=/models
+# 1 = read the card's VRAM at start and pick MODEL_FILE / CTX_SIZE / KV type to
+# match (see entrypoint.sh). 0 = use MODEL_FILE and CTX_SIZE as given.
+ENV AUTO_SCALE=1
+# VRAM to assume instead of asking nvidia-smi, in MiB. Empty = detect.
+ENV VRAM_MIB=
+# Headroom left free on each device, in MiB. Matches llama.cpp's --fit-target.
+ENV FIT_MARGIN_MIB=1024
+# A number, or 'auto' to drop --ctx-size and let llama.cpp's own fitter size the
+# KV pool against free VRAM. Ignored when AUTO_SCALE=1 picks a value.
 ENV CTX_SIZE=32768
 ENV N_GPU_LAYERS=99
 # 0 on the CPU build; empty means "let llama.cpp pick" (cores - 1 is usually right).

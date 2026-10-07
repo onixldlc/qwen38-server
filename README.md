@@ -166,6 +166,43 @@ No registry secrets to set up — it logs in with the built-in `GITHUB_TOKEN`. A
 *Build and Push* → **Run workflow** forces a run without touching the file, with an optional
 `version` override and a `publish` checkbox you can clear to build and smoke test only.
 
+## Auto-scaling to the card
+
+`AUTO_SCALE=1` (the default) reads total VRAM with `nvidia-smi` at start and picks the quant,
+the context and the KV cache type to match, so one template works on any card:
+
+| VRAM | `MODEL_FILE` | KV | Context | Used | Free |
+|---|---|---|---|---|---|
+| 12 GB | `UD-Q2_K_XL` | q8_0 | 28672 | 11214 MiB | 1074 MiB |
+| 16 GB | `UD-Q3_K_XL` | q8_0 | 57344 | 15329 MiB | 1055 MiB |
+| 24 GB | `UD-Q4_K_XL` | q8_0 | 131072 | 21986 MiB | 2590 MiB |
+| 32 GB | `UD-Q5_K_XL` | f16 | 98304 | 26942 MiB | 5826 MiB |
+| 48 GB | `UD-Q5_K_XL` | f16 | 131072 | 28990 MiB | 20162 MiB |
+| 64 GB+ | `UD-Q6_K_XL` | f16 | 262144 (native cap) | 41399 MiB | rest |
+
+Figures are with `ENABLE_VISION=1`; the mmproj is 888 MiB. The rows above 24 GB come from a
+fixed table, the 12/16/64+ rows size the context from what is left after weights, mmproj and
+`FIT_MARGIN_MIB` (1024 MiB, the same default llama.cpp uses for `--fit-target`).
+
+The KV arithmetic comes from the GGUF header rather than a guess: `block_count = 65` with
+`full_attention_interval = 4` leaves 16 full-attention layers, and with `head_count_kv = 4`
+and `key_length = value_length = 256` that is 16 x 4 x 512 = 32768 elements per token —
+**64 MiB per 1024 tokens at f16, 34 MiB at q8_0**. The other 49 blocks are SSM layers whose
+state does not grow with context, which is why a 27B holds 128K on one 24 GB card.
+
+`AUTO_SCALE=0` pins `MODEL_FILE` and `CTX_SIZE` from the environment. `VRAM_MIB=N` overrides
+the detection. On multi-GPU hosts the totals are summed, since llama.cpp splits layers across
+every visible device.
+
+### Letting llama.cpp size the context instead
+
+`CTX_SIZE=auto` drops `--ctx-size` from the command line entirely. llama.cpp then sizes the KV
+pool itself — `fit_params` is **on by default** (`common/common.h:481`) and reserves
+`--fit-target` MiB (1024 by default, `common.h:486`). It measures the compute buffers rather
+than estimating them, so it is more accurate than any table here; the catch is that it only
+adjusts arguments that are not passed, which is why the entrypoint has to leave the flag off
+for it to do anything.
+
 ## Pick the quant
 
 | VRAM | `MODEL_FILE` | Size | Context (q8_0 KV) |

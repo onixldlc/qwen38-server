@@ -24,11 +24,12 @@ Links: [weights on HuggingFace](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)
 ## Layout
 
 ```
-docker/        Dockerfile + entrypoint.sh + verify.sh + mcp-web.sh — shared by both stacks
+docker/        Dockerfile + entrypoint.sh + verify.sh + mcp-web.sh + mcp-files.sh
+docker/gateway/  nginx + njs front door: Dockerfile, nginx.conf.template, upload.js
 gpu/           compose.yaml + compose-dev.yaml + .env  — CUDA
 cpu/           compose.yaml + compose-dev.yaml + .env  — CPU-only, for a VPS
 VERSION        the release number; changing it is what triggers a publish
-.github/       workflow that builds both variants and pushes them to GHCR
+.github/       workflow that builds all three images and pushes them to GHCR
 ```
 
 `compose.yaml` pulls the published image — `:gpu` or `:cpu` — so a plain `up` downloads a
@@ -64,6 +65,7 @@ Skip the build and pull from GHCR. One image name, the variant is the tag:
 
 | Tag | What it is |
 |---|---|
+| `ghcr.io/onixldlc/qwen38-server:gateway` | newest nginx + njs front door — rolling |
 | `ghcr.io/onixldlc/qwen38-server:gpu` | newest CUDA build — rolling |
 | `ghcr.io/onixldlc/qwen38-server:cpu` | newest CPU-only build — rolling |
 | `ghcr.io/onixldlc/qwen38-server:v0.1.0-gpu` | that release's CUDA build — pinned |
@@ -107,22 +109,170 @@ Note that an **absolute** path is passed through unchanged
 ([`server-tools.cpp:162`](https://github.com/ggml-org/llama.cpp/blob/b11461/tools/server/server-tools.cpp#L162)) —
 `/workspace` is a default, not a jail. The tools can reach anything the container can.
 
+## Uploads and the gateway
+
+The agent tools above can read anything on `/workspace`, but only once the model knows the
+path. Nothing tells it that a zip arrived, where it landed, or what is inside. That is the
+gap the gateway and the `uploads_*` tools close.
+
+**One port, two things behind it.** `gateway` is the service that publishes `8080`;
+`llama-server` keeps its port inside the compose network and is proxied. Everything this
+image serves lives under `/manage/`, and everything outside it is llama.cpp:
+
+```
+:8080/manage/                the file manager page
+:8080/manage/files           JSON listing       ?path= &depth=
+:8080/manage/upload          PUT a raw body     ?name=
+:8080/manage/remove          DELETE one upload  ?name=
+:8080/manage/download/<path> read a file back out
+:8080/manage/health          gateway liveness, no upstream involved
+
+:8080/                       llama.cpp's WebUI and API (/v1/*, /health, /props, ...)
+```
+
+**The page and the API are the same endpoints.** `/manage/` is a file manager — a listing in
+the middle, drop files anywhere on it to upload, click a file to download it, click a folder
+to walk into it — and every action it takes is one of the URLs above. There is no private
+API behind the UI, so anything the page can do, `curl` and the MCP server can do with the
+same call.
+
+The single prefix is also why the upstream can grow any route it likes without colliding
+with this image.
+
+nginx and njs are **one** service, not two: njs is an nginx module, so the upload handler and
+the reverse proxy are the same process. The image is `alpine` plus the distro `nginx` and
+`nginx-mod-http-js`, deliberately not `nginx:alpine` — `ngx_http_js_module` is a dynamic
+module and only loads into the exact nginx build it was compiled against, and Alpine main
+ships the pair at a matching `-r` revision.
+
+Uploads are a **raw body, never multipart**. nginx buffers the body to a temp file on the same
+filesystem as the destination and `upload.js` renames it into place, so a multi-gigabyte zip
+never touches the njs heap:
+
+```bash
+curl -T report.zip 'http://127.0.0.1:8080/manage/upload?name=report.zip'
+```
+
+```json
+{
+  "stored": "report.zip",
+  "bytes": 19283746,
+  "workspace_path": "inbox/report.zip",
+  "download": "/manage/download/inbox/report.zip"
+}
+```
+
+**`workspace_path` is the point.** The gateway writes to the volume that is also
+`llama-server`'s working directory, so a path reported here is already relative to what the
+built-in file tools resolve against. Nothing translates paths between the two halves, because
+there is nothing to translate.
+
+### Scripting it
+
+```bash
+curl -s   'http://127.0.0.1:8080/manage/files?path=inbox&depth=1'
+curl -T x.zip 'http://127.0.0.1:8080/manage/upload?name=x.zip'
+curl -O   'http://127.0.0.1:8080/manage/download/inbox/x.zip'
+curl -X DELETE 'http://127.0.0.1:8080/manage/remove?name=x.zip'
+```
+
+`depth=1` lists one level, which is what the page walks; left off, the listing recurses to
+`UPLOADS_MAX_DEPTH`. Both forms cap out at 2000 entries and say so with `"truncated": true`.
+
+### What the model sees
+
+`docker/mcp-files.sh` is a second MCP stdio server — `sh`, `jq`, `find`, `unzip`, `tar` —
+exposing five tools:
+
+| Tool | What it answers |
+|---|---|
+| `uploads_list` | what is on the volume, newly uploaded archives first |
+| `uploads_peek` | what is inside an archive, **without** extracting it |
+| `uploads_extract` | unpack into `extracted/<name>/` and report every path |
+| `uploads_tree` | structure under a path, depth-limited |
+| `uploads_stat` | size, type, and whether it needs extracting first |
+
+Every path they return is relative to `/workspace` and can be handed to `read_file` or
+`grep_search` unchanged. `uploads_extract` also collapses an archive's single top-level
+directory, so `report.zip` becomes `extracted/report/README.md` rather than
+`extracted/report/report/README.md` — one less path for the model to get wrong.
+
+Extraction exists as a tool because `exec_shell_command` is deliberately **not** in the
+shipped `EXTRA_ARGS`: the model has no shell and cannot unpack an archive itself. `unzip` and
+`zstd` ship in the image for exactly this.
+
+The two MCP servers have independent switches under one master:
+
+```bash
+MCP_ENABLE=1           # master; 0 means no MCP config at all
+MCP_FILES_ENABLE=1     # uploads_*
+MCP_WEB_ENABLE=0       # web_search / web_fetch
+```
+
+Both are stdio children of `llama-server`, not services. This release parses only
+`command`, `cwd`, `args`, `env` and `timeout_ms` from its MCP config
+([`server-mcp.cpp:147`](https://github.com/ggml-org/llama.cpp/blob/b11461/tools/server/server-mcp.cpp#L147))
+and warns-and-skips any entry without a `command` — there is no HTTP transport, so there is
+nothing to point at another container.
+
+### Token, and what it is worth
+
+`UPLOAD_TOKEN` is **empty by default**, which disables the check: anyone who can reach the
+port can write to the volume the model reads. That is the intended posture here because
+reaching the port already means an SSH tunnel. Set it and uploads need `X-Upload-Token` (the
+`/manage/` page has a field that keeps it in the browser only):
+
+```bash
+UPLOAD_TOKEN=$(openssl rand -hex 16)
+```
+
+Upload names are validated as leaf names and anything with a separator, a `..` or a leading
+dot is **refused rather than sanitised** — quietly rewriting a name would make the path
+reported back to the model wrong, which is worse than an error it can read.
+
+`/manage/download/` is gated the same way, but by njs rather than by the `alias`: the handler
+checks the token and the path and then `internalRedirect`s to an `internal` location, so the
+bytes stream out with `sendfile` instead of passing through the JS heap. Serving the alias
+directly would have left every uploaded file readable to anyone who guessed its name while
+listing and upload still honoured the token.
+
+### One wrinkle: uploaded files are mode 0600
+
+An upload inherits the mode of the nginx body temp file it was renamed from, which is `0600`
+owned by the gateway worker. Both containers run as root by default, so the model reads them
+fine. It only bites if you change either container to a non-root user — njs has no `chmod`,
+so there is nothing in `upload.js` that could widen it. Run both as the same uid if you move
+off root.
+
+### One ordering constraint
+
+nginx resolves an upstream server name when it **parses** its config, not per request, so the
+gateway cannot start before `qwen38` resolves on the compose network. That is why
+`depends_on` is present and set to `service_started` — not `service_healthy`, because the
+model server spends up to 15 minutes loading weights and everything under `/manage/` should
+answer throughout. Only `/` returns 502 until the upstream is up.
+
 ## Web tools
 
 The model can also search and read the web. `llama-server` speaks MCP over stdio, so this is
 one script in the image rather than a service: `docker/mcp-web.sh` is an MCP server exposing
-`web_search` and `web_fetch`, built out of `curl` and `jq` and nothing else. Set
-`MCP_ENABLE=1` in the stack's `.env`:
+`web_search` and `web_fetch`, built out of `curl` and `jq` and nothing else. It shares the
+master `MCP_ENABLE` switch with the uploads server above and has its own, which ships **off**
+since this is the one that reaches the internet:
 
 ```bash
-MCP_ENABLE=1
+MCP_ENABLE=1              # master
+MCP_WEB_ENABLE=1          # this server; 0 in the shipped .env.example
 SEARXNG_URL=              # empty = DuckDuckGo lite, no key, no account
 SEARCH_RESULTS=8
 FETCH_MAX_CHARS=20000
 ```
 
-The entrypoint renders `/etc/qwen38/mcp.json.template` into a temp dir at start and passes
-`--mcp-servers-config` to `llama-server`. The tools then appear as `web_search` /
+The entrypoint renders `/etc/qwen38/mcp.json.template` into a temp dir at start, deletes the
+servers whose switch is off with `jq`, and passes `--mcp-servers-config` to `llama-server`
+(one template holds every server, rather than a second template that would drift from the
+first). If `MCP_ENABLE=1` but every server is off, the flag is not passed at all. The tools
+then appear as `web_search` /
 `web_fetch` in `GET /tools`, in the built-in Web UI and to any OpenAI client that sends a
 `tools` array — llama.cpp prefixes MCP tools with the server name, so they show up under the
 server named `web`.
@@ -143,8 +293,15 @@ Worth knowing before you turn it on:
 
 ## CI
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) builds both variants in a
-matrix off the one Dockerfile and pushes them to GHCR.
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds the `gpu` and `cpu`
+variants in a matrix off the one Dockerfile, builds the `gateway` image from
+`docker/gateway/Dockerfile` in a job of its own, and pushes all three to GHCR.
+
+The gateway's smoke test starts the real entrypoint and drives the njs handlers over HTTP —
+`/manage/health`, `/manage/files`, a full upload round trip, the same file back out through
+`/manage/download/`, a refused traversing filename and the page itself. That is the only
+check that proves the dynamic module actually loaded into that nginx build. It overrides `UPSTREAM` to `127.0.0.1:9`, because nginx resolves an upstream name when
+it parses the config and the default `qwen38` does not exist on a runner.
 
 **The `VERSION` file is the trigger.** The workflow runs only on a push to `main` that
 changes that file — any other commit costs zero Actions minutes. So a release is one edit,
@@ -153,8 +310,9 @@ no credentialed machine.
 
 ```
 VERSION: 0.1.0 -> 0.2.0        commit to main
-  => ghcr.io/onixldlc/qwen38-server:v0.2.0-gpu   (pinned)
-     ghcr.io/onixldlc/qwen38-server:v0.2.0-cpu   (pinned)
+  => ghcr.io/onixldlc/qwen38-server:v0.2.0-gpu       (pinned)
+     ghcr.io/onixldlc/qwen38-server:v0.2.0-cpu       (pinned)
+     ghcr.io/onixldlc/qwen38-server:v0.2.0-gateway   (pinned)
      ghcr.io/onixldlc/qwen38-server:gpu          (moved to this build)
      ghcr.io/onixldlc/qwen38-server:cpu          (moved to this build)
 ```
@@ -208,6 +366,29 @@ rather than 131072.
 the detection. On multi-GPU hosts the totals are summed, since llama.cpp splits layers across
 every visible device.
 
+### Pin the quant, auto-size the context
+
+These two compose, and the combination is usually what you want on a card the table
+under-fills. `AUTO_SCALE=1` is all-or-nothing — it overwrites `MODEL_FILE`, `CTX_SIZE` and the
+KV type together — so pinning the quant while still filling the card means turning the table
+off and delegating only the context:
+
+```bash
+AUTO_SCALE=0
+MODEL_FILE=Qwen3.8-27B-UD-Q4_K_XL.gguf
+CTX_SIZE=auto
+```
+
+At `AUTO_SCALE=0` the autoscaler never runs, so nothing can overwrite the quant; `CTX_SIZE=auto`
+hands only the context to llama.cpp's own fitter, which measures free memory per device
+instead of estimating a pooled total from a table. Two things to keep in mind:
+
+- **Keep `--cache-type-k/v q8_0` in `EXTRA_ARGS`.** At `AUTO_SCALE=0` nothing picks the KV type
+  for you and llama.cpp defaults to `f16`, roughly halving the context that fits.
+- **The fitter will not spill layers to CPU.** `N_GPU_LAYERS` is passed explicitly and the
+  fitter only adjusts arguments that are *not* passed, so it shrinks the context but never
+  reduces `-ngl`. Pin a quant whose weights actually fit.
+
 ### Letting llama.cpp size the context instead
 
 `CTX_SIZE=auto` drops `--ctx-size` from the command line entirely. llama.cpp then sizes the KV
@@ -251,10 +432,15 @@ pick at 12–16 GB.
 
 ```bash
 cp .env.example .env     # pick MODEL_FILE + CTX_SIZE for your card
-podman compose up -d
+podman compose up -d     # starts qwen38 AND the gateway in front of it
 podman logs -f qwen38    # first start downloads 18.5 GB into the qwen38-models volume
 curl localhost:8080/v1/models
 ```
+
+`8080` is the **gateway**; `llama-server` is proxied behind it and publishes no port of its
+own. The chat UI is still at `/`, and `/manage/` is the file manager. To reach `llama-server`
+directly as well, uncomment its `ports:` block in `compose.yaml` — it maps to `8081` so the
+two do not collide.
 
 Plain podman, same shape as the invokeai run:
 
@@ -266,7 +452,18 @@ podman run --rm --name qwen38 \
   ghcr.io/onixldlc/qwen38-server:gpu
 ```
 
-Building it yourself instead: `podman build -t qwen38-server:dev -f docker/Dockerfile .`
+That form skips the gateway, so there is no upload page — fine when you only want the API.
+The `uploads_*` tools still work against whatever is on `/workspace`.
+
+Building them yourself instead:
+
+```bash
+podman build -t qwen38-server:dev         -f docker/Dockerfile .
+podman build -t qwen38-server:dev-gateway -f docker/gateway/Dockerfile .
+```
+
+Both take the repo root as context, which is why the `-f` path is `docker/...` rather than a
+`cd` into it.
 
 `nvidia.com/gpu=0` is the NVIDIA card and nothing else — `/etc/cdi/nvidia.yaml` lists only that
 card, so the AMD RX 9060 XT is never handed to the container. `nvidia-ctk cdi list` prints the

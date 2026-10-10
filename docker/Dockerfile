@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update
 
-RUN apt-get install -y --no-install-recommends ca-certificates curl tar libgomp1 libcurl4 jq
+RUN apt-get install -y --no-install-recommends ca-certificates curl tar libgomp1 libcurl4 jq unzip zstd
 
 RUN rm -rf /var/lib/apt/lists/*
 
@@ -38,9 +38,14 @@ COPY docker/autoscale.sh /usr/local/bin/autoscale.sh
 # MCP stdio server for web_search / web_fetch. llama-server spawns it as a
 # child process, so it ships in the image rather than as a separate service.
 COPY docker/mcp-web.sh /usr/local/bin/mcp-web
+
+# MCP stdio server for the uploads volume. Tells the model what was uploaded
+# and where it landed, so the built-in file tools have a path to work with.
+COPY docker/mcp-files.sh /usr/local/bin/mcp-files
+
 COPY docker/mcp.json.template /etc/qwen38/mcp.json.template
 
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/verify.sh /usr/local/bin/autoscale.sh /usr/local/bin/mcp-web
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/verify.sh /usr/local/bin/autoscale.sh /usr/local/bin/mcp-web /usr/local/bin/mcp-files
 
 # The release tarball carries its own shared objects next to the binaries.
 ENV LD_LIBRARY_PATH=/app/bin:/usr/local/cuda/lib64
@@ -72,15 +77,31 @@ ENV HOST=0.0.0.0
 ENV PORT=8080
 ENV DOWNLOAD_ATTEMPTS=20
 ENV EXTRA_ARGS=
-# Web tools, off by default. 1 renders the MCP config and hands llama-server
-# --mcp-servers-config, exposing web_search / web_fetch to the model.
+# Tool servers, off by default. 1 renders the MCP config and hands llama-server
+# --mcp-servers-config. Which servers that config ends up holding is the two
+# switches below; MCP_ENABLE=0 means none of them regardless.
 ENV MCP_ENABLE=0
+# web_search / web_fetch.
+ENV MCP_WEB_ENABLE=1
+# uploads_list / uploads_peek / uploads_extract / uploads_tree / uploads_stat.
+ENV MCP_FILES_ENABLE=1
 # Empty = DuckDuckGo's lite endpoint, no key. Point at your own SearXNG to
 # keep queries on your network (its settings.yml needs `json` in search.formats).
 ENV SEARXNG_URL=
 ENV SEARCH_RESULTS=8
 ENV FETCH_MAX_CHARS=20000
 ENV HTTP_TIMEOUT=20
+# The uploads volume, shared with the gateway. This is also WORKDIR below, so a
+# path mcp-files reports is already relative to what the built-in file tools
+# resolve against — that is the whole trick, and changing one without the other
+# breaks it.
+ENV UPLOADS_WORKSPACE=/workspace
+ENV INBOX_SUBDIR=inbox
+ENV EXTRACT_SUBDIR=extracted
+# Caps on what one tool call may return, so an extracted node_modules cannot
+# flood the context window.
+ENV UPLOADS_MAX_DEPTH=12
+ENV UPLOADS_MAX_ENTRIES=400
 
 EXPOSE 8080
 

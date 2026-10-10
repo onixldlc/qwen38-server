@@ -1,0 +1,169 @@
+# Single front door for the qwen38 stack. The double-underscore delimited names
+# below are rendered by docker/gateway/entrypoint.sh into an ephemeral file at
+# start, so the template is what gets mounted and reviewed while the resolved
+# config never lands on disk. Nothing else in this file may use that spelling:
+# the entrypoint greps for leftovers and refuses to start if it finds any.
+#
+# EVERYTHING this image serves lives under /manage/ — the page and the endpoints
+# it calls are one namespace:
+#
+#   /manage/                the file manager page
+#   /manage/files           JSON listing       (the page, and anything scripted)
+#   /manage/upload          PUT a raw body
+#   /manage/remove          DELETE one upload
+#   /manage/download/<path> read a file back out (token-gated, then internal)
+#   /manage/health          this container's liveness, no upstream involved
+#
+# Everything OUTSIDE /manage/ is llama.cpp, proxied. Keeping one prefix means the
+# upstream can grow any route it likes without colliding with this image, and the
+# UI and the scriptable API are the same endpoints rather than two surfaces.
+#
+# The njs module is a DYNAMIC module and only loads into the exact nginx build it
+# was compiled against. Both come from Alpine main at the same -r revision, and
+# the path below is from the package file list rather than an include, so a
+# missing module fails loudly at startup instead of silently skipping routes.
+load_module /usr/lib/nginx/modules/ngx_http_js_module.so;
+
+# Uploads land on a volume shared with the model server, which runs as root and
+# so owns everything it writes there. A worker running as nginx:nginx could not
+# write alongside it. This container does nothing but move files on that volume.
+user root;
+worker_processes auto;
+pid /run/nginx.pid;
+
+error_log /dev/stderr __ERROR_LEVEL__;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    access_log  /dev/stdout;
+
+    sendfile           on;
+    tcp_nopush         on;
+    keepalive_timeout  65;
+    server_tokens      off;
+
+    js_import upload from /etc/qwen38/njs/upload.js;
+
+    # The body is buffered here and then RENAMED into place, so this directory
+    # has to be on the same filesystem as the uploads volume — a rename across
+    # devices fails with EXDEV, which upload.js reports rather than silently
+    # falling back to a copy. 1 2 is the usual two-level hash fan-out.
+    client_body_temp_path __DATA_DIR__/.tmp 1 2;
+
+    proxy_temp_path   /var/lib/nginx/tmp/proxy;
+    fastcgi_temp_path /var/lib/nginx/tmp/fastcgi;
+    uwsgi_temp_path   /var/lib/nginx/tmp/uwsgi;
+    scgi_temp_path    /var/lib/nginx/tmp/scgi;
+
+    upstream llama {
+        server __UPSTREAM__;
+        keepalive 16;
+    }
+
+    server {
+        listen      __LISTEN_PORT__;
+        server_name _;
+
+        # upload.js reads its configuration from these rather than process.env:
+        # nginx hands a worker an environment stripped to TZ unless every name is
+        # declared in an `env` directive at main level.
+        set $data_dir     "__DATA_DIR__";
+        set $inbox_dir    "__INBOX_DIR__";
+        set $upload_token "__UPLOAD_TOKEN__";
+
+        client_max_body_size __MAX_UPLOAD_SIZE__;
+
+        # An exact match wins over every prefix below, so the order of these
+        # blocks does not matter to nginx — they are grouped for reading.
+
+        # This container's own liveness. Deliberately not proxied: it has to
+        # answer while the model server is still loading 18 GB of weights.
+        location = /manage/health {
+            access_log off;
+            default_type text/plain;
+            return 200 "ok\n";
+        }
+
+        # Raw body, not multipart. PUT the bytes and name the file in the query
+        # string. The page uses this same endpoint:
+        #   curl -T x.zip 'http://host:PORT/manage/upload?name=x.zip'
+        location = /manage/upload {
+            client_body_in_file_only on;
+            client_body_buffer_size  256k;
+            client_max_body_size     __MAX_UPLOAD_SIZE__;
+            js_content upload.upload;
+        }
+
+        # ?path= to scope it, ?depth=1 for a single level (what the page walks).
+        location = /manage/files {
+            js_content upload.list;
+        }
+
+        location = /manage/remove {
+            js_content upload.remove;
+        }
+
+        # Read a file back out. The handler only AUTHORISES — it checks the
+        # token and the path and then internally redirects to /__dl/ below, so
+        # the bytes never pass through njs. Serving the alias directly here
+        # would leave downloads ungated while everything else honoured the
+        # token. ^~ stops nginx looking for a regex match it would never find.
+        location ^~ /manage/download/ {
+            js_content upload.download;
+        }
+
+        # Reachable ONLY by internalRedirect from upload.download, never from
+        # the network. Both the location and the alias keep their trailing
+        # slash: dropping either is the classic nginx alias traversal, where
+        # /__dl../ escapes the directory.
+        location ^~ /__dl/ {
+            internal;
+            alias __DATA_DIR__/;
+            autoindex off;
+            add_header Content-Disposition "attachment";
+        }
+
+        location = /manage {
+            return 302 /manage/;
+        }
+
+        # The page itself. Longest-prefix, so it only catches what the exact
+        # matches above did not.
+        location /manage/ {
+            alias /usr/share/nginx/html/manage/;
+            index index.html;
+        }
+
+        # Everything else is llama.cpp: its WebUI at /, and /v1/*, /health,
+        # /props, /slots, /completion and the rest of its API.
+        location / {
+            proxy_pass http://llama;
+            proxy_http_version 1.1;
+
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            # Empty, not "keep-alive": this is what lets the upstream keepalive
+            # pool above actually be reused.
+            proxy_set_header Connection        "";
+
+            # Token streaming is server-sent events. Buffering here would hold
+            # the whole answer back and hand it over in one lump at the end.
+            proxy_buffering off;
+            proxy_cache     off;
+
+            # A cold prompt can sit for minutes before the first token, and a
+            # long generation for much longer than any default allows.
+            proxy_connect_timeout 75s;
+            proxy_send_timeout    3600s;
+            proxy_read_timeout    3600s;
+        }
+    }
+}

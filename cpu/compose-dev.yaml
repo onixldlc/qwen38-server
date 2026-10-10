@@ -1,12 +1,12 @@
-# Build from this checkout instead of pulling the published image. Use it when
+# Build from this checkout instead of pulling the published images. Use it when
 # you are changing anything under docker/ — a released tag cannot contain edits
 # you have not published yet.
 #
 #   podman compose -f compose.yaml -f compose-dev.yaml up -d --build
 #
-# Everything else (ports, volume, cpu caps, env_file) comes from compose.yaml;
-# this file only replaces where the image comes from. The local tag is distinct
-# so a dev image never shadows the pulled one.
+# Everything else (ports, volumes, cpu caps, env_file) comes from compose.yaml;
+# this file only replaces where the images come from. The local tags are distinct
+# so a dev image never shadows a pulled one.
 services:
   qwen38:
     image: localhost/qwen38-server:dev-cpu
@@ -19,3 +19,11 @@ services:
         # Plain ubuntu + the CPU release asset: no CUDA base, no GPU runtime.
         BASE_IMAGE: docker.io/library/ubuntu:24.04
         LLAMA_FLAVOR: ubuntu-x64
+
+  gateway:
+    # Same gateway either way: it has no CUDA in it and no model to load.
+    image: localhost/qwen38-server:dev-gateway
+    pull_policy: never
+    build:
+      context: ..
+      dockerfile: docker/gateway/Dockerfile

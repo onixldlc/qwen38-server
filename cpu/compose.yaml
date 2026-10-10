@@ -1,4 +1,47 @@
 services:
+  # Front door. nginx + njs in one service: njs is an nginx module, so the
+  # upload handler and the reverse proxy are the same process.
+  #
+  #   /          llama.cpp's WebUI and API, proxied to qwen38 below
+  #   /manage/          the file manager page: list, upload, download
+  #   /manage/upload    PUT a raw body:  curl -T x.zip '.../manage/upload?name=x.zip'
+  #   /manage/files     JSON listing of the shared volume
+  #   /manage/download/ read a file back out
+  #
+  # This is what publishes 8080 now. qwen38 keeps its port inside the network.
+  gateway:
+    image: ghcr.io/onixldlc/qwen38-server:gateway
+    pull_policy: always
+    container_name: qwen38-gateway-cpu
+    ports:
+      - "8080:8080"
+    volumes:
+      # Shared with qwen38 below, where it is the server's working directory.
+      # That is what makes a path from /files usable by the model unchanged.
+      - qwen38-workspace:/workspace
+    environment:
+      UPSTREAM: qwen38:8080
+      LISTEN_PORT: 8080
+      DATA_DIR: /workspace
+      # Empty disables the check. Reaching this port already means an SSH
+      # tunnel, so a second secret is optional — set it to require the token.
+      UPLOAD_TOKEN: ${UPLOAD_TOKEN:-}
+      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-8g}
+    # Deliberately service_started, not service_healthy: on CPU the model server
+    # spends even longer loading, and everything under /manage/ should answer
+    # throughout. Only / returns 502 until the upstream is up.
+    depends_on:
+      qwen38:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      # The gateway's own liveness, not the model's — no upstream involved.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/manage/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   qwen38:
     # The published image. :cpu is the newest CPU-only build; pin :vX.Y.Z-cpu if
     # you want a fixed one. https://github.com/onixldlc/qwen38-server/pkgs/container/qwen38-server
@@ -9,13 +52,18 @@ services:
     image: ghcr.io/onixldlc/qwen38-server:cpu
     pull_policy: always
     container_name: qwen38-cpu
-    ports:
-      - "8080:8080"
+    # No ports: gateway publishes 8080 and proxies here. Uncomment to reach
+    # llama-server directly as well, bypassing the gateway:
+    # ports:
+    #   - "8081:8080"
     volumes:
       - qwen38-models:/models
-      # The built-in file tools in EXTRA_ARGS resolve relative paths against the
-      # server's working directory, /workspace. Mount a project there to give
-      # them something to work on — without this they only see an empty dir:
+      # The uploads volume, and the server's working directory. The built-in file
+      # tools in EXTRA_ARGS resolve relative paths against it, so whatever the
+      # gateway drops in here is readable by the model with no extra wiring.
+      - qwen38-workspace:/workspace
+      # To work on a project from the host instead of uploaded files, mount it
+      # over the same path — note this HIDES the uploads volume:
       # - ./workspace:/workspace:z
     # Compose auto-reads ./.env only to expand ${VAR} inside this file.
     # Putting those vars INSIDE the container needs this line.
@@ -40,3 +88,4 @@ services:
 
 volumes:
   qwen38-models:
+  qwen38-workspace:

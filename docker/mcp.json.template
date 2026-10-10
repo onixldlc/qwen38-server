@@ -9,6 +9,17 @@
         "HTTP_TIMEOUT": "__HTTP_TIMEOUT__"
       },
       "timeout_ms": 60000
+    },
+    "files": {
+      "command": "/usr/local/bin/mcp-files",
+      "env": {
+        "UPLOADS_WORKSPACE": "__UPLOADS_WORKSPACE__",
+        "INBOX_SUBDIR": "__INBOX_SUBDIR__",
+        "EXTRACT_SUBDIR": "__EXTRACT_SUBDIR__",
+        "UPLOADS_MAX_DEPTH": "__UPLOADS_MAX_DEPTH__",
+        "UPLOADS_MAX_ENTRIES": "__UPLOADS_MAX_ENTRIES__"
+      },
+      "timeout_ms": 120000
     }
   }
 }

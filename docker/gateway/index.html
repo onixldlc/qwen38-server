@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qwen38 files</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6a717c; --line: #e3e5e9;
+    --accent: #2f6feb; --panel: #f7f8fa; --hover: #eef1f6;
+    --err: #b3261e; --ok: #1a7f37;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --fg: #e6e8ea; --muted: #9aa2ad; --line: #272c34;
+      --accent: #5b8cff; --panel: #151921; --hover: #1d222c;
+      --err: #ff6b5e; --ok: #4ac26b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 16px 40px; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  main { max-width: 880px; margin: 0 auto; }
+
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 19px; margin: 0; }
+  header a { color: var(--accent); font-size: 13px; text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+
+  nav {
+    font-family: var(--mono); font-size: 13px; margin: 14px 0 8px;
+    display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  }
+  nav button {
+    font: inherit; background: none; border: 0; padding: 2px 4px;
+    color: var(--accent); cursor: pointer; border-radius: 4px;
+  }
+  nav button:hover { background: var(--hover); }
+  nav span { color: var(--muted); }
+
+  /* The listing IS the drop target: one surface for both jobs. */
+  #fm {
+    border: 2px dashed var(--line); border-radius: 10px; background: var(--panel);
+    min-height: 240px; transition: border-color .12s, background .12s;
+  }
+  #fm.hot { border-color: var(--accent); background: var(--hover); }
+
+  .row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 14px; border-bottom: 1px solid var(--line);
+    cursor: pointer; font-size: 14px;
+  }
+  .row:last-child { border-bottom: 0; }
+  .row:hover { background: var(--hover); }
+  .row .ico { width: 18px; text-align: center; color: var(--muted); flex: none; }
+  .row .nm {
+    flex: 1; font-family: var(--mono); font-size: 13px;
+    word-break: break-all; min-width: 0;
+  }
+  .row .tag {
+    font-size: 11px; color: var(--accent); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 5px; flex: none;
+  }
+  .row .sz { color: var(--muted); font-size: 12px; white-space: nowrap; flex: none; }
+  .row .del {
+    font: inherit; font-size: 12px; padding: 2px 8px; flex: none;
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+  }
+  .row .del:hover { color: var(--err); border-color: var(--err); }
+
+  .hint {
+    padding: 44px 16px; text-align: center; color: var(--muted); font-size: 13px;
+  }
+  .hint b { color: var(--accent); }
+
+  #xfer:not(:empty) {
+    margin-bottom: 10px; border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden;
+  }
+  #xfer .row { cursor: default; background: var(--panel); }
+  #xfer .row:hover { background: var(--panel); }
+  .bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 5px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+
+  footer { margin-top: 26px; color: var(--muted); font-size: 13px; }
+  footer h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--muted); margin: 20px 0 6px;
+  }
+  input[type=password] {
+    font: inherit; font-size: 13px; padding: 5px 9px; width: 210px;
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  footer button {
+    font: inherit; font-size: 13px; padding: 5px 11px; cursor: pointer;
+    background: transparent; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  footer button:hover { border-color: var(--accent); color: var(--accent); }
+  code {
+    font-family: var(--mono); font-size: 12px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+  }
+  pre {
+    font-family: var(--mono); font-size: 12px; background: var(--panel); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 11px;
+    overflow-x: auto; margin: 6px 0 0;
+  }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  #pick { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>qwen38 files</h1>
+    <a href="/">&larr; chat</a>
+    <span style="flex:1"></span>
+    <a href="#" id="reload">refresh</a>
+  </header>
+
+  <nav id="crumbs"></nav>
+
+  <div id="xfer"></div>
+
+  <div id="fm" tabindex="0" role="region" aria-label="File manager: drop files here to upload">
+    <p class="hint">loading&hellip;</p>
+  </div>
+  <input type="file" id="pick" multiple>
+
+  <footer>
+    <p id="foot" style="margin:10px 0 0"></p>
+
+    <h2>Upload token</h2>
+    <p style="margin:0 0 8px">
+      Only needed if <code>UPLOAD_TOKEN</code> is set on the gateway. Kept in this
+      browser only.
+    </p>
+    <input type="password" id="tok" placeholder="leave empty if disabled" autocomplete="off">
+    <button id="save">Save</button> <span id="toksaved" class="ok"></span>
+
+    <h2>Same endpoints from a shell</h2>
+    <pre id="curl"></pre>
+  </footer>
+</main>
+
+<script>
+/*
+ * Everything this page calls lives under /manage/, and they are the same
+ * endpoints a script or the MCP server would use — there is no separate API.
+ *
+ * Paths from /manage/files are already relative to the model server's working
+ * directory, so nothing here has to know where the volume is mounted.
+ */
+var API = {
+  files:    '/manage/files',
+  upload:   '/manage/upload',
+  remove:   '/manage/remove',
+  download: '/manage/download/'
+};
+var TOK_KEY = 'qwen38-upload-token';
+
+var fm = document.getElementById('fm');
+var pick = document.getElementById('pick');
+var xfer = document.getElementById('xfer');
+var crumbs = document.getElementById('crumbs');
+var foot = document.getElementById('foot');
+var tokEl = document.getElementById('tok');
+
+var cwd = '';
+
+function token() {
+  try { return localStorage.getItem(TOK_KEY) || ''; } catch (e) { return ''; }
+}
+
+function authHeaders() {
+  var t = token();
+  return t ? { 'X-Upload-Token': t } : {};
+}
+
+// The token also rides in the query string so a plain <a> download works.
+function qs(params) {
+  var t = token();
+  if (t) params.token = t;
+  var out = [];
+  for (var k in params) {
+    if (params[k] !== undefined && params[k] !== null) {
+      out.push(encodeURIComponent(k) + '=' + encodeURIComponent(params[k]));
+    }
+  }
+  return out.length ? '?' + out.join('&') : '';
+}
+
+function human(n) {
+  if (n === undefined || n === null) return '';
+  var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n + ' ' + u[i] : n.toFixed(1) + ' ' + u[i]);
+}
+
+function leaf(p) {
+  var parts = p.split('/');
+  return parts[parts.length - 1];
+}
+
+function encPath(p) {
+  return p.split('/').map(encodeURIComponent).join('/');
+}
+
+function el(tag, cls, txt) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (txt !== undefined) e.textContent = txt;
+  return e;
+}
+
+// --- breadcrumbs ------------------------------------------------------------
+
+function drawCrumbs() {
+  crumbs.textContent = '';
+  var root = el('button', null, 'volume');
+  root.onclick = function () { go(''); };
+  crumbs.appendChild(root);
+
+  if (!cwd) return;
+  var parts = cwd.split('/');
+  var acc = '';
+  for (var i = 0; i < parts.length; i++) {
+    acc = acc ? acc + '/' + parts[i] : parts[i];
+    crumbs.appendChild(el('span', null, '/'));
+    if (i === parts.length - 1) {
+      crumbs.appendChild(el('span', null, parts[i]));
+    } else {
+      var b = el('button', null, parts[i]);
+      b.onclick = (function (target) {
+        return function () { go(target); };
+      })(acc);
+      crumbs.appendChild(b);
+    }
+  }
+}
+
+/*
+ * The open folder lives in the URL hash, not just in a variable: that gives
+ * back/forward, survives a reload, and makes a folder linkable. hashchange is
+ * the single place that moves cwd, so there is one path in and no loop.
+ */
+function curHash() {
+  try {
+    return decodeURIComponent(location.hash.replace(/^#/, ''));
+  } catch (e) {
+    return '';
+  }
+}
+
+function go(path) {
+  var want = '#' + encodeURIComponent(path).replace(/%2F/g, '/');
+  if (path === '') want = '#';
+  if (location.hash !== want && !(path === '' && location.hash === '')) {
+    location.hash = want;   // hashchange does the rest
+  } else {
+    cwd = path;
+    refresh();
+  }
+}
+
+window.addEventListener('hashchange', function () {
+  cwd = curHash();
+  refresh();
+});
+
+// --- listing ----------------------------------------------------------------
+
+function refresh() {
+  drawCrumbs();
+  // depth=1: one level at a time, so a deep extracted tree does not arrive all
+  // at once. The walk is the user's, not the server's.
+  fetch(API.files + qs({ path: cwd, depth: 1 }), { headers: authHeaders() })
+    .then(function (r) { return r.json(); })
+    .then(render)
+    .catch(function (e) {
+      fm.textContent = '';
+      fm.appendChild(el('p', 'hint err', 'could not list: ' + e.message));
+    });
+}
+
+function render(d) {
+  fm.textContent = '';
+  foot.textContent = '';
+
+  if (d.error) {
+    fm.appendChild(el('p', 'hint err', d.error));
+    return;
+  }
+
+  var entries = d.entries || [];
+  // Directories first, then files, each alphabetical by leaf name.
+  entries.sort(function (a, b) {
+    if ((a.type === 'dir') !== (b.type === 'dir')) return a.type === 'dir' ? -1 : 1;
+    return leaf(a.path).localeCompare(leaf(b.path));
+  });
+
+  if (cwd) {
+    var up = el('div', 'row');
+    up.appendChild(el('span', 'ico', '↑'));
+    up.appendChild(el('span', 'nm', '..'));
+    up.onclick = function () {
+      var parts = cwd.split('/');
+      parts.pop();
+      go(parts.join('/'));
+    };
+    fm.appendChild(up);
+  }
+
+  if (!entries.length) {
+    fm.appendChild(dropHint(cwd ? 'this folder is empty' : 'nothing uploaded yet'));
+    return;
+  }
+
+  entries.forEach(function (e) {
+    var row = el('div', 'row');
+    var isDir = e.type === 'dir';
+
+    row.appendChild(el('span', 'ico', isDir ? '▸' : '·'));
+    row.appendChild(el('span', 'nm', leaf(e.path)));
+
+    if (!isDir && /\.(zip|tar|tgz|tar\.gz|tar\.bz2|tar\.xz|tar\.zst|jar|whl)$/i.test(e.path)) {
+      row.appendChild(el('span', 'tag', 'archive'));
+    }
+
+    row.appendChild(el('span', 'sz', isDir ? '' : human(e.bytes)));
+
+    if (isDir) {
+      row.title = 'open';
+      row.onclick = function () { go(e.path); };
+    } else {
+      row.title = 'download';
+      row.onclick = function () {
+        // A real navigation, so the browser streams it to disk rather than
+        // buffering a multi-gigabyte blob in memory first.
+        window.location.href = API.download + encPath(e.path) + qs({});
+      };
+    }
+
+    // /manage/remove takes a leaf name in the inbox, so only an upload sitting
+    // directly in inbox/ can be deleted — anything deeper came out of an
+    // extraction and belongs to the model's working tree.
+    if (!isDir && cwd === 'inbox') {
+      var del = el('button', 'del', 'delete');
+      del.onclick = function (ev) {
+        ev.stopPropagation();
+        if (!window.confirm('Delete ' + leaf(e.path) + '?')) return;
+        fetch(API.remove + qs({ name: leaf(e.path) }), {
+          method: 'DELETE',
+          headers: authHeaders()
+        }).then(refresh);
+      };
+      row.appendChild(del);
+    }
+
+    fm.appendChild(row);
+  });
+
+  var n = entries.filter(function (e) { return e.type === 'file'; }).length;
+  foot.textContent = n + ' file(s) here. Drop anywhere on the list to upload '
+    + '— uploads land in inbox/, whichever folder is open.';
+  if (d.truncated) {
+    foot.textContent += ' Listing truncated at ' + d.count + ' entries.';
+  }
+}
+
+function dropHint(msg) {
+  var p = el('p', 'hint');
+  p.appendChild(el('b', null, 'Drop files here'));
+  p.appendChild(document.createTextNode(' or click to choose. ' + msg + '.'));
+  return p;
+}
+
+// --- uploading --------------------------------------------------------------
+
+function uploadOne(file) {
+  var row = el('div', 'row');
+  var left = el('div');
+  left.style.flex = '1';
+  left.style.minWidth = '0';
+  var nm = el('div', 'nm', file.name);
+  var bar = el('div', 'bar');
+  var fill = el('i');
+  bar.appendChild(fill);
+  left.appendChild(nm);
+  left.appendChild(bar);
+
+  var sz = el('span', 'sz', human(file.size));
+
+  row.appendChild(el('span', 'ico', '↑'));
+  row.appendChild(left);
+  row.appendChild(sz);
+  xfer.appendChild(row);
+
+  // XHR rather than fetch: fetch still cannot report upload progress, and these
+  // are exactly the files big enough to need it.
+  var xhr = new XMLHttpRequest();
+  xhr.open('PUT', API.upload + qs({ name: file.name }));
+  var t = token();
+  if (t) xhr.setRequestHeader('X-Upload-Token', t);
+
+  xhr.upload.onprogress = function (ev) {
+    if (ev.lengthComputable) fill.style.width = (ev.loaded / ev.total * 100) + '%';
+  };
+
+  xhr.onload = function () {
+    var body = {};
+    try { body = JSON.parse(xhr.responseText); } catch (e) { /* keep {} */ }
+    if (xhr.status === 201) {
+      nm.textContent = body.workspace_path || file.name;
+      sz.className = 'sz ok';
+      sz.textContent = human(body.bytes) + ' ✓';
+      bar.remove();
+      // Clear the finished row shortly; the file is in the list below now.
+      setTimeout(function () { row.remove(); }, 2500);
+      refresh();
+    } else {
+      bar.remove();
+      sz.className = 'sz err';
+      sz.textContent = body.error || ('HTTP ' + xhr.status);
+    }
+  };
+
+  xhr.onerror = function () {
+    bar.remove();
+    sz.className = 'sz err';
+    sz.textContent = 'network error';
+  };
+
+  xhr.send(file);
+}
+
+function send(files) {
+  for (var i = 0; i < files.length; i++) uploadOne(files[i]);
+}
+
+// --- wiring -----------------------------------------------------------------
+
+fm.addEventListener('click', function (ev) {
+  // Only the empty-state hint opens the picker; a click on a row is that row's.
+  if (ev.target === fm || ev.target.closest('.hint')) pick.click();
+});
+pick.onchange = function () { send(pick.files); pick.value = ''; };
+
+['dragenter', 'dragover'].forEach(function (name) {
+  fm.addEventListener(name, function (ev) {
+    ev.preventDefault();
+    fm.classList.add('hot');
+  });
+});
+['dragleave', 'drop'].forEach(function (name) {
+  fm.addEventListener(name, function (ev) {
+    ev.preventDefault();
+    fm.classList.remove('hot');
+  });
+});
+fm.addEventListener('drop', function (ev) {
+  if (ev.dataTransfer && ev.dataTransfer.files) send(ev.dataTransfer.files);
+});
+
+// Dropping anywhere but the list would otherwise make the browser navigate to
+// the file, losing the page.
+['dragover', 'drop'].forEach(function (name) {
+  window.addEventListener(name, function (ev) {
+    if (!fm.contains(ev.target)) ev.preventDefault();
+  });
+});
+
+document.getElementById('reload').onclick = function (ev) {
+  ev.preventDefault();
+  refresh();
+};
+
+document.getElementById('save').onclick = function () {
+  try { localStorage.setItem(TOK_KEY, tokEl.value); } catch (e) { /* private mode */ }
+  var note = document.getElementById('toksaved');
+  note.textContent = 'saved';
+  setTimeout(function () { note.textContent = ''; }, 1500);
+  refresh();
+};
+
+document.getElementById('curl').textContent =
+  "curl -T report.zip '" + location.origin + "/manage/upload?name=report.zip'\n"
+  + "curl -s '" + location.origin + "/manage/files?path=inbox&depth=1'\n"
+  + "curl -O '" + location.origin + "/manage/download/inbox/report.zip'";
+
+tokEl.value = token();
+cwd = curHash();
+refresh();
+</script>
+</body>
+</html>

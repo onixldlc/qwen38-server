@@ -137,20 +137,61 @@ if [ "${ENABLE_VISION}" = "1" ] && [ -n "${MMPROJ_FILE}" ]; then
     args+=(--mmproj "${MODEL_DIR}/${MMPROJ_FILE}")
 fi
 
-# Web tools. The config carries no secret, but it is still rendered from the
-# template into an ephemeral dir at start so the values come from the
+# MCP tool servers. The config carries no secret, but it is still rendered from
+# the template into an ephemeral dir at start so the values come from the
 # environment rather than from a file baked into the image.
+#
+# Both servers are stdio children of llama-server, not compose services:
+# server-mcp.cpp:147 parses only command/cwd/args/env/timeout_ms, so this
+# release has no HTTP transport to point at a separate container.
 if [ "${MCP_ENABLE:-0}" = "1" ]; then
     mcp_dir="$(mktemp -d)"
+    mcp_raw="${mcp_dir}/mcp.raw.json"
     mcp_config="${mcp_dir}/mcp.json"
+
     sed -e "s#__SEARXNG_URL__#${SEARXNG_URL:-}#" \
         -e "s#__SEARCH_RESULTS__#${SEARCH_RESULTS:-8}#" \
         -e "s#__FETCH_MAX_CHARS__#${FETCH_MAX_CHARS:-20000}#" \
         -e "s#__HTTP_TIMEOUT__#${HTTP_TIMEOUT:-20}#" \
-        /etc/qwen38/mcp.json.template > "$mcp_config"
-    args+=(--mcp-servers-config "$mcp_config")
-    log "web tools on, search via ${SEARXNG_URL:-duckduckgo}"
+        -e "s#__UPLOADS_WORKSPACE__#${UPLOADS_WORKSPACE:-/workspace}#" \
+        -e "s#__INBOX_SUBDIR__#${INBOX_SUBDIR:-inbox}#" \
+        -e "s#__EXTRACT_SUBDIR__#${EXTRACT_SUBDIR:-extracted}#" \
+        -e "s#__UPLOADS_MAX_DEPTH__#${UPLOADS_MAX_DEPTH:-12}#" \
+        -e "s#__UPLOADS_MAX_ENTRIES__#${UPLOADS_MAX_ENTRIES:-400}#" \
+        /etc/qwen38/mcp.json.template > "$mcp_raw"
+
+    if grep -q '__[A-Z_]*__' "$mcp_raw"; then
+        log "FAILED mcp.json still has unrendered placeholders:"
+        grep -o '__[A-Z_]*__' "$mcp_raw" | sort -u | sed 's/^/  /'
+        exit 1
+    fi
+
+    # One template holds every server and the ones switched off are deleted here,
+    # rather than kept as a second template that would drift from the first.
+    mcp_filter='.'
+    [ "${MCP_WEB_ENABLE:-1}" = "1" ]   || mcp_filter="${mcp_filter} | del(.mcpServers.web)"
+    [ "${MCP_FILES_ENABLE:-1}" = "1" ] || mcp_filter="${mcp_filter} | del(.mcpServers.files)"
+    jq "$mcp_filter" "$mcp_raw" > "$mcp_config"
+
+    mcp_on="$(jq -r '.mcpServers | keys | join(", ")' "$mcp_config")"
+    if [ -z "$mcp_on" ]; then
+        log "mcp: MCP_ENABLE=1 but every server is off, not passing --mcp-servers-config"
+    else
+        args+=(--mcp-servers-config "$mcp_config")
+        log "mcp servers: ${mcp_on}"
+        if [ "${MCP_WEB_ENABLE:-1}" = "1" ]; then
+            log "  web:   search via ${SEARXNG_URL:-duckduckgo}"
+        fi
+        if [ "${MCP_FILES_ENABLE:-1}" = "1" ]; then
+            log "  files: uploads under ${UPLOADS_WORKSPACE:-/workspace}"
+        fi
+    fi
 fi
+
+# The gateway writes here and the built-in file tools read from here. Creating
+# them up front means an empty volume still lists cleanly instead of erroring.
+mkdir -p "${UPLOADS_WORKSPACE:-/workspace}/${INBOX_SUBDIR:-inbox}" \
+         "${UPLOADS_WORKSPACE:-/workspace}/${EXTRACT_SUBDIR:-extracted}" 2>/dev/null || true
 
 log "volume holds: $(ls -1A "$MODEL_DIR" | tr '\n' ' ')"
 
